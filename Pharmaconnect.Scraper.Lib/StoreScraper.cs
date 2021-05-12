@@ -1,9 +1,12 @@
-﻿using Fizzler.Systems.HtmlAgilityPack;
+﻿using AzureMapsToolkit;
+using AzureMapsToolkit.Search;
+using Fizzler.Systems.HtmlAgilityPack;
 using HtmlAgilityPack;
 using System;
-using System.Collections.Generic;
+using System.IO;
 using System.Linq;
-using System.Text;
+using System.Net;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace Pharmaconnect.Scraper.Lib
@@ -21,30 +24,77 @@ namespace Pharmaconnect.Scraper.Lib
 
         private const string CONTACT_TYPE_PHONE = "Phone:";
 
-        public Guid StoreUID { get; private set; }
+        private readonly AzureMapsServices _azureMaps;
 
-        public StoreScraper(Guid storeUID)
+        public StoreScraper(string azureMapsKey)
         {
-            StoreUID = storeUID;
+            _azureMaps = new AzureMapsServices(azureMapsKey);
         }
 
-        public async Task<Store> Load()
+        public async Task<Store> Load(Store store)
         {
             var htmlWeb = new HtmlWeb();
-            var htmlDoc = await htmlWeb.LoadFromWebAsync(string.Format(URL_STORE_DETAILS, StoreUID));
+            var htmlDoc = await htmlWeb.LoadFromWebAsync(string.Format(URL_STORE_DETAILS, store.ID));
             var docNode = htmlDoc.DocumentNode;
 
             var name = docNode.QuerySelector(SELECTOR_STORE_NAME).InnerText.Trim();
             var address = string.Join(" ", docNode.QuerySelectorAll(SELECTOR_STORE_ADDRESS).Select(n => n.InnerText.Trim()).Where(t => !t.Contains("Note:", StringComparison.InvariantCultureIgnoreCase)));
             var phone = docNode.QuerySelectorAll(SELECTOR_STORE_CONTACT).Where(n => n.ChildNodes[1].InnerText.Trim().Equals(CONTACT_TYPE_PHONE)).FirstOrDefault().ChildNodes[3].InnerText.Trim();
 
-            return new Store
+            store.Name = name;
+            store.Address = address;
+            store.Phone = phone;
+
+            return store;
+        }
+
+        public async Task<Store> Geolocate(Store store)
+        {
+            var searchAddressRequest = new SearchAddressRequest
             {
-                ID = StoreUID,
-                Name = name,
-                Address = address,
-                Phone = phone
+                Query = WebUtility.UrlEncode(store.Address),
+                Limit = 5
             };
+            var searchResp = await _azureMaps.GetSearchAddress(searchAddressRequest);
+            if (searchResp.Error != null)
+            {
+                //Handle error
+            }
+
+            var resultLatLng = searchResp.Result.Results[0].Position;
+
+            var timezoneResp = await _azureMaps.GetTimezoneByCoordinates(new AzureMapsToolkit.Timezone.TimeZoneRequest
+            {
+                Query = $"{resultLatLng.Lat},{resultLatLng.Lon}"
+            });
+
+            if (timezoneResp.Error != null)
+            {
+                //handle error?
+            }
+
+            store.Latitude = resultLatLng.Lat;
+            store.Longitude = resultLatLng.Lon;
+            store.Timezone = timezoneResp.Result.TimeZones[0].Id;
+
+            return store;
+        }
+
+        public async Task ScrapStoreDB()
+        {
+            var storeDbJson = await File.ReadAllTextAsync("pharmaconnect_storedb.json");
+            var stores = JsonSerializer.Deserialize<Store[]>(storeDbJson);
+
+            for (var i = 0; i < stores.Length; i++)
+            {
+                var store = stores[i];
+
+                store = await Load(store);
+                store = await Geolocate(store);
+            }
+
+            storeDbJson = JsonSerializer.Serialize(stores);
+            await File.WriteAllTextAsync("pharmaconnect_storedb.json", storeDbJson);
         }
     }
 }
